@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+.jupyter/
+.jupyter-data/
+.jupyter-runtime/
+.ipython/
+.venv/
+*.egg-info/
+pytest-cache-files-*/
+qutip_coeffs_*/
+.claude/
