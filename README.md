@@ -1,6 +1,6 @@
 # qrc-engine
 
-`qrc-engine` is a hardware-agnostic quantum reservoir computing library. It lets you define a reservoir workflow once, then swap the backend between gate-based, photonic, and open-system simulators without changing the training loop. The package is intentionally small, but it is structured like an infrastructure library: typed backend contracts, deterministic tasks, optional backend dependencies, automated tests, examples, CI, and an executed evaluation notebook.
+`qrc-engine` is a hardware-agnostic quantum reservoir computing library. It lets you define a reservoir workflow once, then swap the backend between gate-based, photonic, and open-system simulators without changing the training loop. The package stays compact, but it now supports persistent-state evolution, Fock-space photonic dynamics, multivariate inputs, online readouts, optional noise models, and deterministic tests.
 
 ## Installation
 
@@ -21,90 +21,89 @@ pip install -r requirements-all.txt
 
 ```python
 from qrc_engine import Reservoir
-from qrc_engine.backends import QiskitBackend, PercevalBackend
-from qrc_engine.tasks import narma10
-
-backend = QiskitBackend(n_qubits=3, depth=3, shots=1024, seed=11)
-reservoir = Reservoir(backend=backend, washout=50, alpha=1e-2)
+from qrc_engine.backends import PercevalBackend, QiskitBackend
+from qrc_engine.tasks import lorenz_system, narma10
 
 X_train, y_train, X_test, y_test = narma10(n_samples=500, split=0.8, seed=11)
+
+backend = QiskitBackend(n_qubits=3, depth=3, persistent_state=True, seed=11)
+reservoir = Reservoir(backend=backend, washout=50, alpha=1e-2)
 reservoir.fit(X_train, y_train)
 print(f"Qiskit NRMSE: {reservoir.score(X_test, y_test):.4f}")
 
-reservoir.set_backend(PercevalBackend(n_modes=5, n_photons=2, depth=2, seed=3))
+reservoir.set_backend(
+    PercevalBackend(n_modes=5, n_photons=2, depth=2, fock_mode=True, feedback=True, seed=3)
+)
 reservoir.fit(X_train, y_train)
-print(f"Perceval NRMSE: {reservoir.score(X_test, y_test):.4f}")
+print(f"Perceval Fock NRMSE: {reservoir.score(X_test, y_test):.4f}")
+
+X_train_mv, y_train_mv, X_test_mv, y_test_mv = lorenz_system(n_samples=1200, split=0.8, seed=7)
+online_reservoir = Reservoir(
+    backend=QiskitBackend(n_qubits=3, depth=2, persistent_state=True, seed=5),
+    washout=40,
+)
+online_reservoir.fit_online(X_train_mv, y_train_mv, q=1.0, r=1e-2)
+predictions = online_reservoir.predict_online(X_test_mv)
+print(predictions[:5])
 ```
 
 ## Architecture
 
 ```text
-Reservoir.fit / predict
+Reservoir.fit / fit_online / predict
         |
         v
   BaseBackend.evolve(input_t)
         |
         +-- QiskitBackend   -> gate-based circuit features
-        +-- PercevalBackend -> photonic interferometer features
+        +-- PercevalBackend -> photonic field or Fock-space features
         +-- DynamiqsBackend -> open-system observable features
         |
         v
-  ReadoutLayer (ridge / linear)
+  ReadoutLayer / OnlineReadoutLayer
 ```
 
 ## Backend Comparison
 
-| Backend | Paradigm | Feature output | Optional dependency |
+| Backend | Paradigm | State options | Optional dependency |
 | --- | --- | --- | --- |
-| `QiskitBackend` | Gate-based circuit reservoir | Pauli-Z expectations, ZZ correlations, or basis probabilities | `qiskit`, `qiskit-aer` |
-| `PercevalBackend` | Photonic interferometer reservoir | Mode occupation probabilities and adjacent coherences | `perceval-quandela` |
-| `DynamiqsBackend` | Open quantum system reservoir | Populations and coherences | `dynamiqs` |
+| `QiskitBackend` | Gate-based circuit reservoir | fresh statevector, persistent statevector, shot-based estimation | `qiskit`, `qiskit-aer` |
+| `PercevalBackend` | Photonic interferometer reservoir | classical field, Fock space, feedback-driven Fock mode | `perceval-quandela` |
+| `DynamiqsBackend` | Open quantum system reservoir | convex-mixture dissipation, Lindblad, multi-subsystem | `dynamiqs` |
 
-The backends keep a compact internal memory so consecutive inputs produce non-trivial reservoir dynamics rather than independent one-shot outputs.
+## Readout Options
 
-## Representative Results
+`Reservoir` supports the following batch readouts:
 
-The current benchmark settings in `examples/benchmark_backends.py` produce deterministic local results on NARMA-10:
+- `ridge`
+- `linear`
+- `kernel_ridge`
+- `random_forest`
 
-| Backend | NRMSE | Time (s) |
-| --- | ---: | ---: |
-| `Qiskit (3q, d3)` | `0.741` | `0.68` |
-| `Perceval (5m)` | `0.929` | `0.06` |
-| `dynamiqs (4lvl)` | `0.674` | `0.04` |
+It also supports `fit_online(...)` and `predict_online(...)` through a Kalman-updated `OnlineReadoutLayer`.
 
-These are not meant as absolute research numbers. They are reproducible reference numbers for the current compact backend implementations.
+## Tasks
 
-## Why This Project
+Built-in tasks include:
 
-Quantum reservoir computing becomes infrastructure-heavy as soon as each backend needs a different execution model, data path, and feature extraction strategy. `qrc-engine` is deliberately small, but it shows the abstraction layer that makes backend switching possible: one reservoir API, one readout pipeline, multiple quantum paradigms underneath.
+- `narma10`
+- `mackey_glass`
+- `sine_forecasting`
+- `lorenz_system`
 
-## Project Layout
-
-```text
-qrc-engine/
-|-- qrc_engine/
-|   |-- reservoir.py
-|   |-- readout.py
-|   |-- backends/
-|   `-- tasks/
-|-- examples/
-|-- notebooks/
-|-- tests/
-`-- docs/
-```
+`lorenz_system` exercises the multivariate input path by returning a 3D state vector at each time step and the next-step `x` component as the target.
 
 ## Examples
 
 - `python examples/quickstart.py`
 - `python examples/benchmark_backends.py`
+- `python examples/benchmark_v2.py`
 - `python examples/timeseries_demo.py`
 - `python scripts/generate_evaluation_notebook.py`
 
-`examples/benchmark_backends.py` prints an NRMSE/time table and saves a comparison figure as `benchmark_backends.png`.
-
 ## Evaluation Notebook
 
-An executed notebook is included at `notebooks/qrc_engine_evaluation.ipynb`. It benchmarks all three backends on NARMA-10 and runs a Mackey-Glass forecasting pass with the same public API.
+An executed notebook is included at `notebooks/qrc_engine_evaluation.ipynb`. It benchmarks the backends on NARMA-10 and runs a Mackey-Glass forecasting pass with the same public API.
 
 PowerShell execution on Windows:
 

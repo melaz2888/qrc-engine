@@ -1,45 +1,85 @@
 # qrc-engine Architecture
 
-## Problem
+## Backend Contract
 
-Quantum reservoir computing code is usually tied to one simulator stack at a time. Gate-based, photonic, and open-system frameworks all expose different primitives, state representations, and execution paths, so benchmark code often gets rewritten backend by backend.
+`qrc-engine` keeps a single `BaseBackend` contract and a single `Reservoir` workflow. In v0.2 the backend contract accepts either a scalar input or a multivariate feature vector at each time step:
 
-## Solution
+1. `initialize()` builds the backend-specific state.
+2. `evolve(input_val)` advances the backend by one step and returns a fixed-width feature vector.
+3. `reset()` clears the persistent backend state for a fresh sequence.
+4. `state_dim` reports the feature width.
+5. `metadata` reports backend capabilities:
+   - `paradigm`
+   - `state_type`
+   - `has_noise`
+   - `has_persistent_state`
 
-`qrc-engine` introduces a single `BaseBackend` interface and a single `Reservoir` workflow. The reservoir owns the sequence logic, washout handling, state collection, and classical readout fitting. Each backend only needs to answer three questions: how to initialize the reservoir, how to evolve it for one scalar input, and how to reset it for a fresh sequence.
+This keeps the public reservoir API stable while letting downstream scripts adapt to backend capabilities without `isinstance` checks.
 
-The core flow is:
+## Reservoir Flow
 
-1. Encode `x_t` into the backend.
-2. Evolve the backend state with backend-specific dynamics.
-3. Extract a fixed-width feature vector.
-4. Fit a linear or ridge readout on the collected states.
+The reservoir owns sequence handling, washout, state collection, and readout fitting:
 
-This keeps the user API close to scikit-learn while isolating backend-specific logic behind a narrow contract.
+1. Accept either a 1D scalar sequence or a 2D multivariate sequence.
+2. Pass each time step to `backend.evolve(...)`.
+3. Discard the washout prefix.
+4. Fit either a batch readout (`ridge`, `linear`, `kernel_ridge`, `random_forest`) or an online Kalman-updated readout.
 
-## Why These Three Backends
+`fit_online` uses an `OnlineReadoutLayer` that treats the readout weights as a random walk and updates them with a Kalman-style correction after each observation.
 
-- `QiskitBackend` represents a gate-based circuit reservoir with random fixed parameters and entangling layers.
-- `PercevalBackend` represents a photonic interferometer reservoir with phase modulation and beam-splitter mixing.
-- `DynamiqsBackend` represents an open quantum system reservoir with density-matrix evolution and dissipative dynamics.
+## Backend Evolution Modes
 
-Together they cover three genuinely different quantum computing paradigms while preserving the same fit/predict loop.
+### QiskitBackend
 
-## Trade-offs and Limitations
+The gate-based backend now supports three execution modes:
 
-This project is a reference library, not a production orchestration system. The current backends are intentionally small and deterministic so examples remain readable and reproducible. The Qiskit backend is closest to a native execution path. The Perceval and dynamiqs adapters keep the same abstraction boundary but use compact reference evolutions rather than full-blown workflow orchestration across every capability of those ecosystems.
+- Default mode: rebuild a fresh circuit from `|0...0>` at each step, matching v0.1 behavior.
+- Persistent-state mode: carry the output statevector forward so the next step evolves `|psi_t>` rather than restarting from the ground state.
+- Shot-based mode: sample measurement outcomes from the statevector probabilities and estimate expectation features from counts.
 
-That trade-off keeps the codebase lean and portfolio-friendly, but it also means:
+It also supports additive Gaussian gate noise on every rotation angle.
 
-- no real QPU submission layer yet
-- no batching or asynchronous execution
-- no circuit optimization or backend-aware compilation passes
-- no advanced dataset or hyperparameter management
+### PercevalBackend
 
-## Future Directions
+The photonic backend now supports three modes:
 
-- Add real backend adapters for IBM Runtime, IQM, and Quandela cloud execution.
-- Extend the feature-extraction API to support shot-based observables and richer tomography-like summaries.
-- Add circuit and pulse optimization hooks before execution.
-- Support multivariate inputs, parameter sweeps, and reproducible benchmark harnesses.
-- Introduce backend capability metadata so workflows can adapt automatically to qubit count, connectivity, or photonic mode limits.
+- Classical-field mode: propagate a complex field through phase shifters and beam splitters, matching v0.1 behavior.
+- Fock-space mode: evolve a small symmetric Fock-space state vector and extract occupation expectations and nearest-neighbor occupation correlations.
+- Feedback mode: reset to the initial Fock state after each step and feed the measured occupations back into the next phase encoding.
+
+The Fock-space lift uses the linear-optics permanent formula. For a mode-space unitary `U`, each Fock-basis transition amplitude is computed from a repeated-row, repeated-column submatrix and a permanent:
+
+`<n'|U_hat|n> = perm(U_sub) / sqrt(prod_j n_j! * prod_k n'_k!)`
+
+`qrc_engine.utils.permanent_ryser` implements Ryser's formula in pure NumPy for the small systems used here.
+
+### DynamiqsBackend
+
+The open-system backend now supports:
+
+- Default convex-mixture dissipation, matching v0.1 behavior.
+- Lindblad mode, integrated with a single RK4 step of the Lindblad master equation.
+- Multi-subsystem mode, where the Hilbert space is extended to `(C^d)^⊗n`, the Hamiltonian includes local terms plus nearest-neighbor couplings, and jump operators act locally on each subsystem.
+
+## Noise Models
+
+Two backend-specific noise models are included in v0.2:
+
+- Qiskit gate noise:
+  - `theta_applied = theta_target + epsilon`
+  - `epsilon ~ N(0, sigma^2)`
+- Perceval phase noise and phase resolution:
+  - `phi_applied = round(phi_target / Delta) * Delta + epsilon`
+  - `epsilon ~ N(0, sigma_phi^2)`
+
+All stochastic paths use seeded NumPy generators so runs remain deterministic for a fixed configuration.
+
+## Feature Shapes
+
+The reservoir always receives a fixed-width real feature vector:
+
+- `QiskitBackend`: qubit expectations and pair correlations, or full basis probabilities.
+- `PercevalBackend`: mode occupations plus nearest-neighbor correlations/coherences.
+- `DynamiqsBackend`: populations plus nearest-neighbor coherences in the working Hilbert basis.
+
+The exact physics differs by mode, but the downstream readout stays unchanged.

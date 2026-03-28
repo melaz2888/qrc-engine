@@ -56,3 +56,31 @@ def mackey_glass(
     inputs, targets = usable[:-1], usable[1:]
     cutoff = int(n_samples * split)
     return inputs[:cutoff], targets[:cutoff], inputs[cutoff:], targets[cutoff:]
+
+
+def lorenz_system(
+    n_samples: int = 2000,
+    split: float = 0.8,
+    dt: float = 0.01,
+    seed: int = 0,
+) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
+    """Generate a multivariate Lorenz-system forecasting task."""
+
+    if not 0.0 < split < 1.0:
+        raise ValueError("split must be between 0 and 1.")
+    rng = np.random.default_rng(seed)
+    sigma = 10.0
+    rho = 28.0
+    beta = 8.0 / 3.0
+    series = np.zeros((n_samples + 1, 3), dtype=float)
+    series[0] = np.asarray([1.0, 1.0, 1.0], dtype=float) + rng.normal(scale=0.01, size=3)
+    for step in range(n_samples):
+        x_val, y_val, z_val = series[step]
+        dx = sigma * (y_val - x_val)
+        dy = x_val * (rho - z_val) - y_val
+        dz = (x_val * y_val) - (beta * z_val)
+        series[step + 1] = series[step] + (dt * np.asarray([dx, dy, dz], dtype=float))
+    inputs = series[:-1]
+    targets = series[1:, 0]
+    cutoff = int(n_samples * split)
+    return inputs[:cutoff], targets[:cutoff], inputs[cutoff:], targets[cutoff:]
