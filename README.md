@@ -1,117 +1,117 @@
 # qrc-engine
 
-`qrc-engine` is a hardware-agnostic quantum reservoir computing library. It lets you define a reservoir workflow once, then swap the backend between gate-based, photonic, and open-system simulators without changing the training loop. The package stays compact, but it now supports persistent-state evolution, Fock-space photonic dynamics, multivariate inputs, online readouts, optional noise models, and deterministic tests.
+`qrc-engine` is a hardware-agnostic quantum reservoir computing library. Define a reservoir workflow once, then swap the backend between gate-based, photonic, and open-system simulators without changing the training loop.
+
+## Benchmark Results
+
+All results use 2 000 samples (80/20 split), ridge readout, tuned regularisation. Lower NRMSE is better; > 1.0 means worse than predicting the mean.
+
+| Task | Qiskit | Dynamiqs | Perceval (field) | Perceval (Fock) |
+|------|--------|----------|-----------------|-----------------|
+| Mackey-Glass (chaotic) | **0.07** | 0.23 | 0.83 | 1.00 |
+| NARMA-10 (nonlinear memory) | 0.81 | **0.75** | 1.05 | **0.99** |
+| Lorenz (multivariate 3-D) | **0.28** | 0.46 | — | — |
+
+See `notebooks/qrc_engine_evaluation.ipynb` for the full executed notebook with plots.
 
 ## Installation
 
 ```bash
-pip install qrc-engine
-pip install qrc-engine[qiskit]
-pip install qrc-engine[perceval]
-pip install qrc-engine[dynamiqs]
-pip install qrc-engine[all]
-
-# repo-local installs
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-pip install -r requirements-all.txt
+pip install qrc-engine[qiskit]      # gate-based backend
+pip install qrc-engine[dynamiqs]    # open-system backend
+pip install qrc-engine[perceval]    # photonic backend
+pip install qrc-engine[all]         # everything
 ```
 
 ## Quickstart
 
 ```python
 from qrc_engine import Reservoir
-from qrc_engine.backends import PercevalBackend, QiskitBackend
-from qrc_engine.tasks import lorenz_system, narma10
+from qrc_engine.backends import QiskitBackend, DynamiqsBackend
+from qrc_engine.tasks import mackey_glass, narma10
 
-X_train, y_train, X_test, y_test = narma10(n_samples=500, split=0.8, seed=11)
+# --- Mackey-Glass: one-step-ahead chaotic forecasting ---
+X_train, y_train, X_test, y_test = mackey_glass(n_samples=2000, split=0.8, seed=11)
 
-backend = QiskitBackend(n_qubits=3, depth=3, persistent_state=True, seed=11)
-reservoir = Reservoir(backend=backend, washout=50, alpha=1e-2)
-reservoir.fit(X_train, y_train)
-print(f"Qiskit NRMSE: {reservoir.score(X_test, y_test):.4f}")
-
-reservoir.set_backend(
-    PercevalBackend(n_modes=5, n_photons=2, depth=2, fock_mode=True, feedback=True, seed=3)
+reservoir = Reservoir(
+    backend=QiskitBackend(n_qubits=4, depth=4, seed=11),
+    washout=50,
+    alpha=1e-3,
 )
 reservoir.fit(X_train, y_train)
-print(f"Perceval Fock NRMSE: {reservoir.score(X_test, y_test):.4f}")
+print(f"Mackey-Glass NRMSE: {reservoir.score(X_test, y_test):.4f}")  # ~0.07
 
-X_train_mv, y_train_mv, X_test_mv, y_test_mv = lorenz_system(n_samples=1200, split=0.8, seed=7)
-online_reservoir = Reservoir(
-    backend=QiskitBackend(n_qubits=3, depth=2, persistent_state=True, seed=5),
-    washout=40,
+# --- Swap backend without changing training code ---
+reservoir.set_backend(DynamiqsBackend(levels=5, dt=0.3, gamma=0.1, seed=3))
+reservoir.fit(X_train, y_train)
+print(f"Dynamiqs NRMSE: {reservoir.score(X_test, y_test):.4f}")  # ~0.23
+
+# --- Multivariate Lorenz ---
+from qrc_engine.tasks import lorenz_system
+
+X_train, y_train, X_test, y_test = lorenz_system(n_samples=2000, split=0.8, seed=7)
+reservoir = Reservoir(
+    backend=QiskitBackend(n_qubits=5, depth=3, seed=5),
+    washout=50,
+    alpha=1e-3,
 )
-online_reservoir.fit_online(X_train_mv, y_train_mv, q=1.0, r=1e-2)
-predictions = online_reservoir.predict_online(X_test_mv)
-print(predictions[:5])
+reservoir.fit(X_train, y_train)
+print(f"Lorenz NRMSE: {reservoir.score(X_test, y_test):.4f}")  # ~0.28
 ```
 
 ## Architecture
 
-```text
-Reservoir.fit / fit_online / predict
+```
+Reservoir.fit / fit_online / predict / predict_online
         |
         v
-  BaseBackend.evolve(input_t)
+  BaseBackend.evolve(input_t)          # scalar or feature vector
         |
-        +-- QiskitBackend   -> gate-based circuit features
+        +-- QiskitBackend   -> gate-based statevector features
         +-- PercevalBackend -> photonic field or Fock-space features
-        +-- DynamiqsBackend -> open-system observable features
+        +-- DynamiqsBackend -> open-system density-matrix features
         |
         v
-  ReadoutLayer / OnlineReadoutLayer
+  ReadoutLayer (batch ridge/kernel/RF) or OnlineReadoutLayer (Kalman)
 ```
 
-## Backend Comparison
+## Backends
 
-| Backend | Paradigm | State options | Optional dependency |
-| --- | --- | --- | --- |
-| `QiskitBackend` | Gate-based circuit reservoir | fresh statevector, persistent statevector, shot-based estimation | `qiskit`, `qiskit-aer` |
-| `PercevalBackend` | Photonic interferometer reservoir | classical field, Fock space, feedback-driven Fock mode | `perceval-quandela` |
-| `DynamiqsBackend` | Open quantum system reservoir | convex-mixture dissipation, Lindblad, multi-subsystem | `dynamiqs` |
+| Backend | Paradigm | Modes | Dependency |
+|---------|----------|-------|------------|
+| `QiskitBackend` | Gate-based circuit | fresh statevector · persistent statevector · shot-based | `qiskit`, `qiskit-aer` |
+| `PercevalBackend` | Photonic interferometer | classical field · Fock-space (Ryser permanent) · feedback Fock | `perceval-quandela` |
+| `DynamiqsBackend` | Open quantum system | convex-mixture dissipation · Lindblad master eq. · multi-subsystem | `dynamiqs` |
 
-## Readout Options
+Every backend exposes a `metadata` dict (`paradigm`, `state_type`, `has_noise`, `has_persistent_state`) so you can write capability-aware code without `isinstance` checks.
 
-`Reservoir` supports the following batch readouts:
+## Readout
 
-- `ridge`
-- `linear`
-- `kernel_ridge`
-- `random_forest`
+Batch: `ridge` (default), `linear`, `kernel_ridge`, `random_forest`
 
-It also supports `fit_online(...)` and `predict_online(...)` through a Kalman-updated `OnlineReadoutLayer`.
+Online: `fit_online(X, y, q, r)` + `predict_online(X)` — Kalman-updated weights, no matrix inversion, suitable for streaming data.
 
 ## Tasks
 
-Built-in tasks include:
+| Task | Description | Input dim |
+|------|-------------|-----------|
+| `narma10` | Nonlinear autoregressive moving average order 10 | scalar |
+| `mackey_glass` | Mackey-Glass delay-differential equation | scalar |
+| `sine_forecasting` | One-step-ahead sinusoid | scalar |
+| `lorenz_system` | 3-D Lorenz attractor, predict x(t+1) | 3-D vector |
 
-- `narma10`
-- `mackey_glass`
-- `sine_forecasting`
-- `lorenz_system`
+## Reproducing the Evaluation
 
-`lorenz_system` exercises the multivariate input path by returning a 3D state vector at each time step and the next-step `x` component as the target.
+```bash
+# regenerate the notebook source
+python scripts/generate_evaluation_notebook.py
 
-## Examples
+# execute it
+python -m jupyter nbconvert --to notebook --execute --inplace \
+    notebooks/qrc_engine_evaluation.ipynb
+```
 
-- `python examples/quickstart.py`
-- `python examples/benchmark_backends.py`
-- `python examples/benchmark_v2.py`
-- `python examples/timeseries_demo.py`
-- `python scripts/generate_evaluation_notebook.py`
-
-## Evaluation Notebook
-
-An executed notebook is included at `notebooks/qrc_engine_evaluation.ipynb`. It benchmarks the backends on NARMA-10 and runs a Mackey-Glass forecasting pass with the same public API.
-
-PowerShell execution on Windows:
-
+On Windows:
 ```powershell
-$env:JUPYTER_CONFIG_DIR="$PWD\.jupyter"
-$env:JUPYTER_DATA_DIR="$env:TEMP\qrc-engine-jupyter-data"
-$env:JUPYTER_RUNTIME_DIR="$env:TEMP\qrc-engine-jupyter-runtime"
-$env:JUPYTER_ALLOW_INSECURE_WRITES="1"
-$env:IPYTHONDIR="$env:TEMP\qrc-engine-ipython"
 python -m jupyter nbconvert --to notebook --execute --inplace notebooks/qrc_engine_evaluation.ipynb
 ```
