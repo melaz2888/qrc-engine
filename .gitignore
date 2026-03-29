@@ -10,3 +10,6 @@ __pycache__/
 pytest-cache-files-*/
 qutip_coeffs_*/
 .claude/
+data/*.csv
+experiments/*.pdf
+experiments/*.png

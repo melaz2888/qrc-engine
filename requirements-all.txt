@@ -1,4 +1,4 @@
--e .[all,dev]
+-e .[all,dev,experiments]
 notebook
 ipykernel
 nbformat

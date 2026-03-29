@@ -22,11 +22,13 @@ dependencies = [
 qiskit = ["qiskit>=1.0", "qiskit-aer>=0.13"]
 perceval = ["perceval-quandela>=0.11"]
 dynamiqs = ["dynamiqs>=0.3"]
+experiments = ["pandas>=2.0"]
 all = [
   "qiskit>=1.0",
   "qiskit-aer>=0.13",
   "perceval-quandela>=0.11",
-  "dynamiqs>=0.3"
+  "dynamiqs>=0.3",
+  "pandas>=2.0"
 ]
 dev = ["pytest>=8.0"]
 
