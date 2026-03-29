@@ -25,6 +25,8 @@ class DynamiqsBackend(BaseBackend):
         memory_decay: float = 0.55,
         lindblad: bool = False,
         n_subsystems: int = 1,
+        projective_measurement: bool = False,
+        n_measured_levels: int | None = None,
         seed: int = 0,
     ) -> None:
         """Initialize the open-system backend."""
@@ -37,6 +39,8 @@ class DynamiqsBackend(BaseBackend):
         self.memory_decay = memory_decay
         self.lindblad = lindblad
         self.n_subsystems = n_subsystems
+        self.projective_measurement = projective_measurement
+        self.n_measured_levels = n_measured_levels
         self._initialized = False
         self._input_projection_cache: dict[int, np.ndarray] = {}
         self.initialize()
@@ -114,6 +118,8 @@ class DynamiqsBackend(BaseBackend):
             rho = unitary @ self._rho @ unitary.conj().T
             rho = (1.0 - self.gamma) * rho + (self.gamma * self._ground_state() * np.trace(rho))
         rho = self._stabilize_density_matrix(rho)
+        if self.projective_measurement:
+            rho = self._projective_collapse_rho(rho)
 
         features = self._extract_features(rho)
         populations = np.real(np.diag(rho))
@@ -227,6 +233,49 @@ class DynamiqsBackend(BaseBackend):
         populations = np.real(np.diag(rho))
         coherences = [2.0 * float(np.real(rho[idx, idx + 1])) for idx in range(self._dimension - 1)]
         return np.asarray(np.concatenate([populations, coherences]), dtype=float)
+
+    def _projective_collapse_rho(self, rho: np.ndarray) -> np.ndarray:
+        """Perform projective measurement on the density matrix and collapse.
+
+        Full measurement: sample outcome k from Born probabilities rho_kk,
+        collapse to |k><k|.
+        Partial measurement: measure only a subset of levels.
+        """
+
+        collapse_rng = np.random.default_rng(
+            self.seed + int(np.abs(np.trace(rho)) * 1e8) % (2**31)
+        )
+        populations = np.real(np.diag(rho))
+        populations = np.clip(populations, 0, None)
+        total = float(np.sum(populations))
+        if total == 0:
+            return self._ground_state()
+        populations = populations / total
+
+        n_meas = self.n_measured_levels if self.n_measured_levels is not None else self._dimension
+        n_meas = min(n_meas, self._dimension)
+
+        if n_meas == self._dimension:
+            outcome = int(collapse_rng.choice(self._dimension, p=populations))
+            collapsed = np.zeros((self._dimension, self._dimension), dtype=np.complex128)
+            collapsed[outcome, outcome] = 1.0
+            return collapsed
+
+        meas_probs = populations[:n_meas].copy()
+        total_meas = float(np.sum(meas_probs))
+        if total_meas > 0 and collapse_rng.random() < total_meas:
+            outcome = int(collapse_rng.choice(n_meas, p=meas_probs / total_meas))
+            projector = np.zeros((self._dimension, self._dimension), dtype=np.complex128)
+            projector[outcome, outcome] = 1.0
+            collapsed = projector @ rho @ projector
+            trace = float(np.trace(collapsed))
+            return collapsed / trace if trace > 0 else self._ground_state()
+        else:
+            unmeas_block = rho[n_meas:, n_meas:].copy()
+            collapsed = np.zeros((self._dimension, self._dimension), dtype=np.complex128)
+            collapsed[n_meas:, n_meas:] = unmeas_block
+            trace = float(np.trace(collapsed))
+            return collapsed / trace if trace > 0 else self._ground_state()
 
     def _ground_state(self) -> np.ndarray:
         """Construct the ground-state density matrix."""

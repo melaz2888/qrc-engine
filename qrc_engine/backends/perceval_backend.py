@@ -29,6 +29,8 @@ class PercevalBackend(BaseBackend):
         feedback_strength: float = 1.0,
         phase_noise_std: float = 0.0,
         phase_resolution: float = 0.0,
+        threshold_detection: bool = False,
+        n_detection_samples: int = 1000,
         seed: int = 0,
     ) -> None:
         """Initialize the photonic backend.
@@ -58,6 +60,8 @@ class PercevalBackend(BaseBackend):
         self.feedback_strength = feedback_strength
         self.phase_noise_std = phase_noise_std
         self.phase_resolution = phase_resolution
+        self.threshold_detection = threshold_detection
+        self.n_detection_samples = n_detection_samples
         self._initialized = False
         self._input_projection_cache: dict[int, np.ndarray] = {}
         self.initialize()
@@ -174,7 +178,7 @@ class PercevalBackend(BaseBackend):
         return features
 
     def _evolve_fock(self, mode_unitary: np.ndarray) -> FloatArray:
-        """Propagate the Fock-space state."""
+        """Propagate the Fock-space state, optionally with measurement collapse."""
 
         if self.feedback:
             current_state = self._initial_fock_state
@@ -185,15 +189,48 @@ class PercevalBackend(BaseBackend):
         norm = float(np.linalg.norm(next_state))
         if norm:
             next_state = next_state / norm
-        occupations, correlations = self._occupation_features(next_state)
-        features = np.asarray(np.concatenate([occupations, correlations]), dtype=float)
-        self._memory = self.memory_decay * self._memory + (1.0 - self.memory_decay) * occupations
-        self._feedback_memory = occupations.copy()
-        if self.feedback:
+
+        if self.threshold_detection:
+            features, occupations = self._threshold_detect(next_state)
             self._fock_state = self._initial_fock_state.copy()
         else:
-            self._fock_state = next_state
+            occupations, correlations = self._occupation_features(next_state)
+            features = np.asarray(np.concatenate([occupations, correlations]), dtype=float)
+            if self.feedback:
+                self._fock_state = self._initial_fock_state.copy()
+            else:
+                self._fock_state = next_state
+        self._memory = self.memory_decay * self._memory + (1.0 - self.memory_decay) * occupations
+        self._feedback_memory = occupations.copy()
         return features
+
+    def _threshold_detect(self, state: np.ndarray) -> tuple[FloatArray, FloatArray]:
+        """Simulate threshold detection: sample Fock outcomes, binarize per mode.
+
+        A threshold detector on mode j returns 1 if n_j >= 1, else 0.
+        We sample n_detection_samples outcomes from the Born distribution,
+        binarize each, and return click probabilities + adjacent correlations.
+        """
+
+        born_probs = np.abs(state) ** 2
+        born_probs = born_probs / float(np.sum(born_probs))
+        detection_rng = np.random.default_rng(
+            self.seed + hash(tuple(born_probs[:4].tolist())) % (2**31)
+        )
+        sampled_indices = detection_rng.choice(
+            len(self._fock_basis), size=self.n_detection_samples, p=born_probs
+        )
+        click_counts = np.zeros(self.n_modes, dtype=float)
+        corr_counts = np.zeros(self.n_modes - 1, dtype=float)
+        for idx in sampled_indices:
+            occ = self._fock_basis[idx]
+            clicks = np.asarray([1.0 if n > 0 else 0.0 for n in occ], dtype=float)
+            click_counts += clicks
+            corr_counts += clicks[:-1] * clicks[1:]
+        click_probs = click_counts / self.n_detection_samples
+        corr_probs = corr_counts / self.n_detection_samples
+        features = np.concatenate([click_probs, corr_probs])
+        return features, click_probs
 
     def _encode_inputs(self, input_vector: FloatArray) -> np.ndarray:
         """Map scalar or vector inputs to per-layer encoded values."""

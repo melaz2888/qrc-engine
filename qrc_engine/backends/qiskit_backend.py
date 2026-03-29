@@ -27,6 +27,8 @@ class QiskitBackend(BaseBackend):
         persistent_state: bool = False,
         use_shots: bool = False,
         gate_noise_std: float = 0.0,
+        measure_and_collapse: bool = False,
+        n_measured_qubits: int | None = None,
         seed: int = 0,
     ) -> None:
         """Initialize a gate-based backend.
@@ -54,6 +56,8 @@ class QiskitBackend(BaseBackend):
         self.persistent_state = persistent_state
         self.use_shots = use_shots
         self.gate_noise_std = gate_noise_std
+        self.measure_and_collapse = measure_and_collapse
+        self.n_measured_qubits = n_measured_qubits if n_measured_qubits is not None else n_qubits
         self._memory = np.zeros(self.n_qubits, dtype=float)
         self._initialized = False
         self._step_counter = 0
@@ -99,7 +103,11 @@ class QiskitBackend(BaseBackend):
             statevector = self._statevector.evolve(circuit)
         else:
             statevector = self._Statevector.from_instruction(circuit)
-        probabilities = np.abs(np.asarray(statevector.data, dtype=np.complex128)) ** 2
+        sv_array = np.asarray(statevector.data, dtype=np.complex128)
+        probabilities = np.abs(sv_array) ** 2
+        if self.measure_and_collapse:
+            sv_array, probabilities = self._projective_collapse(sv_array, probabilities)
+            statevector = self._Statevector(sv_array)
         features = self._extract_features(probabilities)
         self._memory = self.memory_decay * self._memory + (1.0 - self.memory_decay) * features[: self.n_qubits]
         self._statevector = statevector
@@ -132,6 +140,46 @@ class QiskitBackend(BaseBackend):
             "has_noise": self.use_shots or (self.gate_noise_std > 0.0),
             "has_persistent_state": self.persistent_state,
         }
+
+    def _projective_collapse(
+        self, sv_array: np.ndarray, probabilities: FloatArray
+    ) -> tuple[np.ndarray, FloatArray]:
+        """Perform projective measurement and collapse the statevector.
+
+        Full measurement (n_measured == n_qubits): sample one basis state from
+        the Born distribution, collapse to that basis state.
+
+        Partial measurement (n_measured < n_qubits): measure only the first
+        n_measured qubits. The unmeasured qubits retain their conditional state.
+        """
+
+        collapse_rng = np.random.default_rng(self.seed + self._step_counter + 9999)
+        n_meas = min(self.n_measured_qubits, self.n_qubits)
+        dim = 2**self.n_qubits
+
+        if n_meas == self.n_qubits:
+            outcome = int(collapse_rng.choice(dim, p=probabilities))
+            collapsed = np.zeros(dim, dtype=np.complex128)
+            collapsed[outcome] = 1.0
+            new_probs = np.zeros(dim, dtype=float)
+            new_probs[outcome] = 1.0
+            return collapsed, new_probs
+
+        dim_meas = 2**n_meas
+        dim_unmeas = 2 ** (self.n_qubits - n_meas)
+        reshaped = sv_array.reshape(dim_unmeas, dim_meas)
+        marginal_probs = np.sum(np.abs(reshaped) ** 2, axis=0)
+        marginal_probs = marginal_probs / float(np.sum(marginal_probs))
+        measured_outcome = int(collapse_rng.choice(dim_meas, p=marginal_probs))
+        conditional = reshaped[:, measured_outcome].copy()
+        norm = float(np.linalg.norm(conditional))
+        if norm > 0:
+            conditional = conditional / norm
+        collapsed = np.zeros(dim, dtype=np.complex128)
+        for k in range(dim_unmeas):
+            collapsed[k * dim_meas + measured_outcome] = conditional[k]
+        new_probs = np.abs(collapsed) ** 2
+        return collapsed, new_probs
 
     def _build_circuit(self, input_vector: FloatArray) -> Any:
         """Build the per-step update circuit."""
